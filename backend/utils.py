@@ -6,6 +6,16 @@ import dataclasses
 
 from typing import List
 
+from urllib.parse import quote, unquote
+
+# Encode text to make it safe for AI Search ingestion
+def encode_text_for_ai_search(text):
+    return quote(text, safe="")
+
+# Decode text to return it to its original format for user display
+def decode_text_from_ai_search(encoded_text):
+    return unquote(encoded_text)
+
 DEBUG = os.environ.get("DEBUG", "false")
 if DEBUG.lower() == "true":
     logging.basicConfig(level=logging.DEBUG)
@@ -90,21 +100,23 @@ def format_non_streaming_response(chatCompletion, history_metadata, apim_request
         message = chatCompletion.choices[0].message
         if message:
             if hasattr(message, "context"):
+                # Decode the context before adding it to the response
+                decoded_context = decode_text_from_ai_search(json.dumps(message.context))
                 response_obj["choices"][0]["messages"].append(
                     {
                         "role": "tool",
-                        "content": json.dumps(message.context),
+                        "content": decoded_context,
                     }
                 )
             response_obj["choices"][0]["messages"].append(
                 {
                     "role": "assistant",
-                    "content": message.content,
+                    "content": decode_text_from_ai_search(message.content),  # Decode AI Search results
                 }
             )
             return response_obj
-
     return {}
+
 
 def format_stream_response(chatCompletionChunk, history_metadata, apim_request_id):
     response_obj = {
@@ -121,26 +133,30 @@ def format_stream_response(chatCompletionChunk, history_metadata, apim_request_i
         delta = chatCompletionChunk.choices[0].delta
         if delta:
             if hasattr(delta, "context"):
-                messageObj = {"role": "tool", "content": json.dumps(delta.context)}
+                # Decode context before adding to response
+                decoded_context = decode_text_from_ai_search(json.dumps(delta.context))
+                messageObj = {"role": "tool", "content": decoded_context}
                 response_obj["choices"][0]["messages"].append(messageObj)
                 return response_obj
             if delta.role == "assistant" and hasattr(delta, "context"):
                 messageObj = {
                     "role": "assistant",
-                    "context": delta.context,
+                    "context": decode_text_from_ai_search(delta.context),  # Decode context
                 }
                 response_obj["choices"][0]["messages"].append(messageObj)
                 return response_obj
             else:
                 if delta.content:
+                    # Decode content before sending it
                     messageObj = {
                         "role": "assistant",
-                        "content": delta.content,
+                        "content": decode_text_from_ai_search(delta.content),
                     }
                     response_obj["choices"][0]["messages"].append(messageObj)
                     return response_obj
 
     return {}
+
 
 
 def format_pf_non_streaming_response(
@@ -151,7 +167,7 @@ def format_pf_non_streaming_response(
             "chatCompletion object is None - Increase PROMPTFLOW_RESPONSE_TIMEOUT parameter"
         )
         return {
-            "error": "No response received from promptflow endpoint increase PROMPTFLOW_RESPONSE_TIMEOUT parameter or check the promptflow endpoint."
+            "error": "No response received from promptflow endpoint. Increase PROMPTFLOW_RESPONSE_TIMEOUT parameter or check the promptflow endpoint."
         }
     if "error" in chatCompletion:
         logging.error(f"Error in promptflow response api: {chatCompletion['error']}")
@@ -160,14 +176,21 @@ def format_pf_non_streaming_response(
     logging.debug(f"chatCompletion: {chatCompletion}")
     try:
         messages = []
+        
+        # Check and decode the main response field
         if response_field_name in chatCompletion:
+            decoded_content = decode_text_from_ai_search(chatCompletion[response_field_name])
             messages.append({
                 "role": "assistant",
-                "content": chatCompletion[response_field_name] 
+                "content": decoded_content
             })
+        
+        # Check and decode the citations field
         if citations_field_name in chatCompletion:
-            citation_content= {"citations": chatCompletion[citations_field_name]}
-            messages.append({ 
+            citation_content = {
+                "citations": decode_text_from_ai_search(json.dumps(chatCompletion[citations_field_name]))
+            }
+            messages.append({
                 "role": "tool",
                 "content": json.dumps(citation_content)
             })
@@ -190,22 +213,26 @@ def format_pf_non_streaming_response(
         return {}
 
 
+
 def convert_to_pf_format(input_json, request_field_name, response_field_name):
     output_json = []
     logging.debug(f"Input json: {input_json}")
-    # align the input json to the format expected by promptflow chat flow
+    # Align the input json to the format expected by promptflow chat flow
     for message in input_json["messages"]:
         if message:
             if message["role"] == "user":
+                encoded_content = encode_text_for_ai_search(message["content"])  # Encode the user message
                 new_obj = {
-                    "inputs": {request_field_name: message["content"]},
+                    "inputs": {request_field_name: encoded_content},  # Encode before sending to AI Search
                     "outputs": {response_field_name: ""},
                 }
                 output_json.append(new_obj)
             elif message["role"] == "assistant" and len(output_json) > 0:
-                output_json[-1]["outputs"][response_field_name] = message["content"]
+                decoded_content = decode_text_from_ai_search(message["content"])  # Decode the AI response
+                output_json[-1]["outputs"][response_field_name] = decoded_content
     logging.debug(f"PF formatted response: {output_json}")
     return output_json
+
 
 
 def comma_separated_string_to_list(s: str) -> List[str]:
